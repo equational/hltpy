@@ -68,6 +68,14 @@ The BuildUpstreamConstraints is a minimilistic example of how the traced data
 can be used to extract the 'reverse' flow constraints needed for structure or 
 type inference.   
 
+## Exmple expression graph visualization:
+The Render class is a draft of converting a trace to a graphviz graph.
+[show_render.py](./show_render.py) take a decently simple trace of a 
+object that adds some number, and produces the following:
+
+![output of show_render.py](./Graph.gv.png) 
+
+
 ## Some public prior work
 [autograd](https://github.com/HIPS/autograd)
 [JAX JIT](https://research.google/pubs/compiling-machine-learning-programs-via-high-level-tracing/)

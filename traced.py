@@ -443,7 +443,7 @@ class Returning(CallBase):
     """ A call or dispatch has a return value """
     def __init__(self, callable_, args, kwargs, return_):
         self._s('_return', return_)
-        super().__init__(callable_, args, kwargs, return_._value)
+        super().__init__(callable_, args, kwargs, return_._value if return_ else None)
 
 class Call(Returning):
     """ Traced call """
@@ -771,7 +771,7 @@ class SignatureHelper:
                    == inspect.Parameter.VAR_KEYWORD) 
             call_kwargs[argument.name] = argument
 
-        return call_args, call_kwargs, has_traced
+        return tuple(call_args), call_kwargs, has_traced
 
 
 TRACED_MODULE_NAMES = set()

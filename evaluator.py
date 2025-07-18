@@ -119,6 +119,7 @@ class Evaluator:
         return evaled_callable(*evaled_args, **evaled_kwargs) 
 
     def argument(self, traced, tag, op1):
+        print(str(tag))
         return self.env[-1][tag]
 
     def op1(self, traced, op1):
