@@ -25,34 +25,37 @@ SOFTWARE.
 
 import unittest
 from traced import trace_modules, trace
-from evaluator import Evaluator
+from compiler import Compiler
 from test_traced import TestTracer01
 
 
-class TestEvaluator01(TestTracer01):
+class TestCompiler01(TestTracer01):
 
     def test_simple01(self):
         add_10 = self.AddX(10)
 
         final_trace = add_10.add_to(5, z=2)
-        evaluator = Evaluator()
-        value = evaluator(final_trace)
+        compiler = Compiler()
+        f_value = compiler(final_trace)
+        value = f_value(())
         self.assertEqual(value, 17)
 
     def test_simple02(self):
         add_10_2 = TestTracer01.AddX2(10)
 
         final_trace2 = add_10_2.add_to(5, z=2)
-        evaluator = Evaluator()
-        value = evaluator(final_trace2)
+        compiler = Compiler()
+        f_value = compiler(final_trace2)
+        value = f_value(())
         self.assertEqual(value, 17)
 
     def test_simple03(self):
         d = trace({'a':trace(1), 'b':2})
         r = d['a']
         self.assertEqual(int(r), 1)
-        evaluator = Evaluator()
-        value = evaluator(r)
+        compiler = Compiler()
+        f_value = compiler(r)
+        value = f_value(())
         self.assertEqual(value, 1)
 
 

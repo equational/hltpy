@@ -22,7 +22,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 """
 
-from traced import trace_modules
+from traced import trace_modules, trace
 from render import Render
 
 class AddX:
@@ -32,14 +32,39 @@ class AddX:
     def add_to(self, y, z=0):
         return self.x + y + z
 
-def simple01():
-    add_10 = AddX(10)
-    r = add_10.add_to(5, z=2)
+def simple01(d):
+    adder = AddX(d['a'])
+    r = adder.add_to(5, z=2)
     return r 
-    
+
+def mk_dict1(**kwargs): # a, b):
+    return kwargs
+    # return trace({'a':a, 'b':b})
+
+def mk_dict2(c):
+    return trace({'c':c})
+
+def simple02(a, b, c):
+    return trace((mk_dict1(a=a, b=b), mk_dict2(c=c)))
+
+def grange(l, h):
+    for i in range(int(l), int(h)):
+        yield(trace(i))
+ 
+def simple03(a, x):
+    d1 = trace({'a':a, 'b':2})
+    d2 = trace({'x':x, 'y':12})
+    d3 = trace({(k1,k2):(v1,v2) 
+                for k1, v1 in d1.items() 
+                for k2, v2 in d2.items()})
+    v1, v2 =  d3[('a','x')]
+    return list(grange(v1, v2))
+
 def show_render():
     r = Render()
-    trace1 = simple01()
+    # trace1 = simple01(trace({'a': trace(3)}))
+    # trace1 = simple02(1, 2, 3)
+    trace1 = simple03(1, 5)
     r.to_graph(trace1)
     r.dot.view()
     r.dot.render(format='png')

@@ -22,21 +22,34 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 """
 
+"""
+TODO: clean up untraced deep construct, expose function for evaluation.
+TODO: test if return from function is an iterator or a generator,
+if that is the case create iterator that refers back to the call or the dispatch.
+__next__ return a Next traced that refers back to creation, and possibly to counter.
+TODO: make Hashable anything that is hashable.
+"""
 
 import inspect
 import functools
 import types
 import functools
+import collections.abc
 from utility import build_expression_support, CALL_PRECEDENCE, LIMIT_PRECEDENCE, \
        GET_ITEM_PRECEDENCE
 
+NO_ATTRIBUTE = object()
+
 class Traced:
     """ Base generic tracing class  """
-    def __init__(self, value):
+    def __init__(self, value, trace=None):
         """ Takes raw Python data and stores it in _value """
         # not (yet) reentrant, make sure raw data is not traced
         assert(not isinstance(value, Traced))
         self._s('_value', value)
+        if trace is not None:
+            assert(isinstance(trace, Traced))
+        self._s('_trace', trace)
 
     def _s(self, name, x):
         """ Standard __setattr__ is intercepted, so we use our own one. """
@@ -56,8 +69,15 @@ class Traced:
     def __repr__(self): return self._value.__repr__()
 
     def __getattr__(self, name):
-        """ Trace get attribute """
-        return GetAttr(Attribute(name), self)
+        """ Get attribute along trace if there, otherwise we assume _value has it"""
+        t = self
+        while t is not None and not name in t.__dict__: 
+            t = t.__dict__.get('_trace')
+        if t is not None:
+            return getattr(t, name)
+        else:
+            assert(hasattr(self._value, name))
+            return GetAttr(Attribute(name), self)
 
     def __setattr__(self, name, value):
         """ setting attributes only allowed on objects created by traced classes. """
@@ -84,8 +104,8 @@ class Traced:
             sighelper = signature_helper(callable_)
             call_args, call_kwargs, has_traced = \
                 sighelper.bind_traced_function(args, kwargs)
-            return_trace = sighelper.func(*call_args, **call_kwargs)
-            return Call(self, call_args, call_kwargs, return_trace)
+            return_trace = to_traced(sighelper.func(*call_args, **call_kwargs))
+            return decorate_traced(Call(self, call_args, call_kwargs, return_trace._value, return_trace))
         else:
             # otherwise we call but having carefully removed all tracing from args
             return_no_traced =  self._value(*[from_traced(arg) 
@@ -94,6 +114,23 @@ class Traced:
                                                for attr, value in kwargs.items()}) 
             return UCall(self, args, kwargs, return_no_traced) 
 
+    def __iter__(self):
+        iter_ = iter(self._value)
+        if isinstance(iter_, Traced):
+            return Iterator(self, iter_._value, iter_)
+        else:
+            return Iterator(self, iter_)
+
+    def __next__(self):
+        if not hasattr(self, '_gen_counter'):
+            self._s('_gen_counter', 0)
+        counter = self._gen_counter
+        self._gen_counter += 1
+        next_ = next(self._value)
+        if isinstance(next_, Traced):
+            return Generation(self, counter, next_._value, next_)
+        else:
+            return Generation(self, counter, next_)
 
     def __getitem__(self, other):
         # trace a get item
@@ -103,13 +140,13 @@ class Traced:
     def MK_OP1(cls, method1, op1):
         # define how standard unary operators are called
         op_name = method1.__reduce__()[1][1]
-        return GetAttr(Attribute(op_name), op1)()
+        return GetAttr(Attribute(op_name), to_traced(op1))()
 
     @classmethod
     def MK_OP2(cls, method2, op1, op2):
         # define how standard binary operators are called
         op_name = method2.__reduce__()[1][1]
-        return GetAttr(Attribute(op_name), op1)(op2)
+        return GetAttr(Attribute(op_name), to_traced(op1))(to_traced(op2))
 
     @classmethod
     def MK_CVT(cls, method1, op1):
@@ -216,11 +253,15 @@ class Traced:
 
 
     def __gt__(self, other):
-        return self.__class__.MK_OP2(self._value.__qt__, self, other)
+        return self.__class__.MK_OP2(self._value.__gt__, self, other)
 
 
     def __ge__(self, other):
-        return self.__class__.MK_OP2(self._value.__qe__, self, other)
+        return self.__class__.MK_OP2(self._value.__ge__, self, other)
+
+
+    def __contains__(self, other):
+        return self.__class__.MK_OP2(self._value.__contains__, self, other)
 
 
     def __neg__(self):
@@ -237,6 +278,12 @@ class Traced:
 
     def __abs__(self):
         return self.__class__.MK_OP1(self._value.__abs__, self)
+
+
+    def __len__(self):
+        if not hasattr(self._value, '__len__'):
+            raise TypeError()
+        return self.__class__.MK_OP1(self._value.__len__, self)
 
 
     def __str__(self):
@@ -258,48 +305,114 @@ class Traced:
     def __complex__(self):
         return self.__class__.MK_CVT(self._value.__complex__, self)
 
+class Hashable(Traced):
+    def __hash__(self):
+        return self._value.__hash__()
 
-class NeedsTupleTracing:
+    def __eq__(self, other):
+        if isinstance(other, Traced):
+            return self._value.__eq__(other._value)
+        else:
+            return self._value.__eq__(other)
+
+class NeedsTracing:
     """ Stateful helper to track if tuple needs to be 'deep traced' """
     def __init__(self):
-        self.trace_copy = False
-        self.trace = False
- 
+        self.has_trace = False
 
-def trace_tuple_if_needed(value, ntt):
-    """ Traceds a tuple with propery deeper tracing if needed """
-    if isinstance(value, tuple): # TODO: process slices as well
-        ntt_ = NeedsTupleTracing()
-        processed = [trace_tuple_if_needed(te, ntt_) for te in value]
-        if ntt_.trace_copy:
-            ntt.trace_copy= True
-            return Tuple(tuple(processed), value)
-        elif ntt_.trace:
-            ntt.trace = True
-            return Tuple(value, value)
+    def split(self, e):
+        """ helper to seperate helper from its value """
+        if isinstance(e, Traced): # includes deep traces too
+            self.has_trace = True
+            return e, e._value
         else:
-            return value
+            return e, e
+
+def to_deep(has_trace, traced, untraced):
+    if has_trace:
+        if isinstance(traced, collections.abc.Hashable):
+            return DeepHashable(traced, untraced)
+        else:
+            return DeepTraced(traced, untraced)
     else:
-        if isinstance(value, Traced):
-            ntt.trace = True
-        return value
+        return untraced
 
-def to_traced(value):
-    """ 'wraps' given value for tracing if needed. Tuples are deep checked. """
-    if isinstance(value, Traced):
-        # Already traced
-        return value
-    elif isinstance(value, tuple):
-        ntt = NeedsTupleTracing()
-        processed = trace_tuple_if_needed(value, ntt)
-        if ntt.trace_copy or ntt.trace:
-            # A tuple with traced alement(s) has its own Tuple trace.
-            return processed
-        else:
-            # A tuple without traced elements(s) is just a simple trace.
-            return Traced(value)
+
+def rebuild_deep(value, to_deep=to_deep, process_traced=None):
+    def rebuild_deep_(value):
+        match value:
+            case Traced():
+                if process_traced:
+                    return process_traced(value)
+                else:
+                    return value
+            case tuple():
+                ntt = NeedsTracing()
+                el_traced, el_untraced = zip(*[ntt.split(rebuild_deep_(e)) for e in value])
+                return to_deep(ntt.has_trace, tuple(el_traced), tuple(el_untraced))
+            case list():
+                ntt = NeedsTracing()
+                el_traced, el_untraced = zip(*[ntt.split(rebuild_deep_(e)) for e in value])
+                return to_deep(ntt.has_trace, el_traced, el_untraced)
+            case slice():
+                ntt = NeedsTracing()
+                start_traced, start_untraced = ntt.split(rebuild_deep_(value.start))
+                stop_traced, stop_untraced = ntt.split(rebuild_deep_(value.stop))
+                step_traced, step_untraced = ntt.split(rebuild_deep_(value.step))
+                traced_slice = slice(start_traced, stop_traced, step_traced)
+                untraced_slice = slice(start_untraced, stop_untraced, step_untraced)
+                return to_deep(ntt.has_trace, traced_slice, untraced_slice)
+            case frozenset():
+                ntt = NeedsTracing()
+                el_traced, el_untraced = zip(*[ntt.split(rebuild_deep_(e)) for e in value])
+                return to_deep(ntt.has_trace, frozenset(el_traced), frozenset(el_untraced))
+            case dict():
+                ntt = NeedsTracing()
+                kl_traced, kl_untraced, el_traced, el_untraced = zip(*[ntt.split(rebuild_deep_(k))+ntt.split(rebuild_deep_(e)) for k, e in value.items()])
+                traced_dict = dict(zip(kl_traced, el_traced))
+                untraced_dict = dict(zip(kl_untraced, el_untraced))
+                return to_deep(ntt.has_trace, traced_dict, untraced_dict)
+            case _:
+                return value
+    return rebuild_deep_(value)
+
+def decorate_traced(traced):
+    if isinstance(traced._value, collections.abc.Generator):
+        return Generator(traced._value, traced) if not isinstance(traced, Generator) else traced
+    elif isinstance(traced._value, collections.abc.Iterator):
+        return Iterator(traced._value, traced) if not isinstance(traced, Iterator) else traced
+    elif isinstance(traced._value, collections.abc.Hashable):
+        return Hashable(traced._value, traced) if not isinstance(traced, Hashable) else traced
+    else:
+        return traced
+ 
+def basic_to_traced(value):
+    if isinstance(value, collections.abc.Generator):
+        return Generator(value)
+    elif isinstance(value, collections.abc.Hashable):
+        return Hashable(value)
     else:
         return Traced(value)
+
+
+def to_deep_trace(value):
+    checked = rebuild_deep(value)
+    if isinstance(checked, Traced):
+        return checked
+    else:
+        return basic_to_traced(value)
+
+
+def to_traced(value):
+    """ 'wraps' given value for tracing if needed. Tuples and ... are deep checked. """
+    if isinstance(value, Traced):
+        # Already traced
+         return value
+    elif isinstance(value, (tuple, list, slice, frozenset, dict)):
+        return to_deep_trace(value)
+    else:
+        return basic_to_traced(value)
+
 
 """ to_trace alias (TODO cleanup) """
 trace = to_traced
@@ -308,23 +421,86 @@ def from_traced(value):
     """ 'unsrap' tracing and returns raw python value """
     if isinstance(value, Traced):
         return value._value
-    elif isinstance(value, Tuple):
-        return tuple([from_traced(te) for te in value])
     else:
         return value
 
-class Tuple(Traced):
-    """ Traced tuples they contain traced data """
-    def __init__(self, traced_tuple, tuple_value):
-        self._s('_traced_tuple', traced_tuple)
-        super().__init__(tuple_value)
+
+
+htrace = trace
+
+class DeepTraced(Traced):
+    """ Traced tuples, slices and 'proxy' dicts when they contain traced data """
+    def __init__(self, traced_value, untraced_value, trace=None):
+        self._s('_traced_value', traced_value)
+        super().__init__(untraced_value, trace)
+
+    def __iter__(self):
+        return Iterator(self, iter(self._traced_value))
+
+class DeepHashable(DeepTraced):
+    """ Traced hashable tuples, slices and 'proxy' dicts when they contain traced data """
+    def __hash__(self):
+        return self._value.__hash__()
+
+    def __eq__(self, other):
+        if isinstance(other, Traced):
+            return self._value.__eq__(other._value)
+        else:
+            return self._value.__eq__(other)
+
+class Iterator(Traced):
+    def __init__(self, iterable, value, trace=None):
+        self._s('_iterable', iterable)
+        self._s('_iter_counter', 0)
+        super().__init__(value, trace)
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        counter = self._iter_counter
+        self._s('_iter_counter', counter + 1)
+        next_ = next(self._value)
+        if isinstance(next_, Traced):
+            return decorate_traced(Iteration(self, counter, next_._value, next_))
+        else:
+            return decorate_traced(Iteration(self, counter, next_))
+
+class Iteration(Traced):
+    def __init__(self, iterator, count, value, trace=None):
+        self._s('_iterator', iterator)
+        self._s('_count', count)
+        super().__init__(value, trace)
+
+class Generator(Traced):
+    def __init__(self, value, trace=None):
+        self._s('_gen_counter', 0)
+        super().__init__(value, trace)
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        counter = self._gen_counter
+        self._s('_gen_counter', counter + 1)
+        next_ = next(self._value)
+        if isinstance(next_, Traced):
+            return decorate_traced(Generation(self, counter, next_._value, next_))
+        else:
+            return decorate_traced(Generation(self, counter, next_))
+
+class Generation(Traced):
+    def __init__(self, generator, count, value, trace=None):
+        self._s('_generator', generator)
+        self._s('_count', count)
+        super().__init__(value, trace)
 
 class Obj(Traced):
     """ Traced object, built by traced classes """
-    def __init__(self, value):
+    def __init__(self, value, trace=None):
         # value is fresh from __new__
         # __init__ of value happens after this init so that __setattr__ get tracked. 
-        super().__init__(value)
+        super().__init__(value, trace)
         # Traced attributes are initially empty, 
         # and dynamically added by __setattr__ called by the value's __init__ later. 
         self._s('_attributes', dict())
@@ -361,10 +537,10 @@ class Class(Traced):
 
 class ArgumentsBase(Traced):
     """ The traced arguments of traced calls and dispatches """
-    def __init__(self, args, kwargs, value):
+    def __init__(self, args, kwargs, value, trace=None):
         self._s('_args', args)
         self._s('_kwargs', kwargs)
-        super().__init__(value)
+        super().__init__(value, trace)
 
     def _arguments_repr(self, first_arg_idx=0):
         return ('('+
@@ -377,9 +553,9 @@ class ArgumentsBase(Traced):
 
 class CallBase(ArgumentsBase):
     """ The traced callable of traced calls and dispatches """
-    def __init__(self, callable_, args, kwargs, value):
+    def __init__(self, callable_, args, kwargs, value, trace=None):
         self._s('_callable', callable_)
-        super().__init__(args, kwargs, value)
+        super().__init__(args, kwargs, value, trace)
 
     def __repr__(self, first_arg_idx=0):
         return (self._callable._precedence_repr(CALL_PRECEDENCE) + 
@@ -438,18 +614,11 @@ class CallBase(ArgumentsBase):
             case _:
                 return None, CALL_PRECEDENCE 
 
-
-class Returning(CallBase):
-    """ A call or dispatch has a return value """
-    def __init__(self, callable_, args, kwargs, return_):
-        self._s('_return', return_)
-        super().__init__(callable_, args, kwargs, return_._value if return_ else None)
-
-class Call(Returning):
+class Call(CallBase):
     """ Traced call """
     pass
 
-class Dispatch(Returning):
+class Dispatch(CallBase):
     """ Traced dispatch """
     def __repr__(self):
         return self._dispatch_precedence_repr(LIMIT_PRECEDENCE, 1)
@@ -473,22 +642,21 @@ class NewInit(ArgumentsBase):
     """ Traced object creation/init """
     # The traced class creates this on instanciating a traced object
     def __init__(self, obj, args, kwargs):
-        self._s('_obj', obj)
-        super().__init__(args, kwargs, obj._value)
+        super().__init__(args, kwargs, obj._value, obj)
 
     def _precedence_repr(self, precedence):
         return Traced._precedence_repr(self, precedence)
 
     def __repr__(self):
-        return (self._obj._precedence_repr(CALL_PRECEDENCE) + 
+        return (self._trace._precedence_repr(CALL_PRECEDENCE) + 
                 self._arguments_repr(1)) 
 
 
 class Op1(Traced):
     """ Base for context specific unary operator tracing """
-    def __init__(self, op1):
+    def __init__(self, op1, trace=None):
         self._s('_op1', op1)
-        super().__init__(self._op1o(op1._value))
+        super().__init__(self._op1o(op1._value), trace)
 
     def __repr__(self): 
          raise NotImplementedError(
@@ -507,13 +675,12 @@ class Op1(Traced):
          raise NotImplementedError(
                 f"_precedence not impl. for {type(self).__name__}")
 
-
 class Op2(Traced):
     """ Base for context specific binary operator tracing """
-    def __init__(self, op1, op2):
+    def __init__(self, op1, op2, trace=None):
         self._s('_op1', op1)
         self._s('_op2', op2)
-        super().__init__(self._op2o(op1._value, op2._value))
+        super().__init__(self._op2o(op1._value, op2._value), trace)
 
     def __repr__(self): 
          raise NotImplementedError(
@@ -534,6 +701,14 @@ class Op2(Traced):
 
 
 class GetItem(Op2):
+    def __init__(self, op1, op2):
+        trace = None
+        if isinstance(op1, DeepTraced):
+            item_trace = op1._traced_value[op2._value]
+            if isinstance(item_trace, Traced):
+                trace = item_trace
+        super().__init__(op1, op2, trace)
+
     def _op2o(self, v1, v2):
         """ The raw operation of the get item operator"""
         return v1[v2]
@@ -593,11 +768,14 @@ class Attribute(Dynamic):
     def __hash__(self):
         return hash(self.name)
 
-
-class BaseHasAttr(Op1):
+class GetAttr(Op1):
     def __init__(self, tag, op1):
         self._s('_tag', tag)
-        super().__init__(op1)
+        if isinstance(op1, Obj):
+            # we get the past trace from the object attributes
+            super().__init__(op1, op1._attributes[tag])
+        else:
+            super().__init__(op1)
 
     def __repr__(self):
         return self._op1._precedence_repr(CALL_PRECEDENCE)+'.'+self._tag.name
@@ -606,7 +784,6 @@ class BaseHasAttr(Op1):
     def _precedence(self):
         return CALL_PRECEDENCE
 
-class GetAttr(BaseHasAttr):
     def _op1o(self, v1):
         """ The raw operation of the get attribute operator"""
         return object.__getattribute__(v1, self._tag.name) 
@@ -622,8 +799,8 @@ class GetAttr(BaseHasAttr):
             sighelper = signature_helper(self._value)
             call_args, call_kwargs, has_traced = \
                 sighelper.bind_traced_function((self._op1,) + args, kwargs)
-            return_trace = sighelper.func(*call_args, **call_kwargs)
-            return Dispatch(self, call_args, call_kwargs, return_trace)
+            return_trace = to_traced(sighelper.func(*call_args, **call_kwargs))
+            return decorate_traced(Dispatch(self, call_args, call_kwargs, return_trace._value, return_trace))
         else:
             # non-traced dispatch, remove all tracing from args
             return_no_traced =  self._value(*[from_traced(arg) 
@@ -634,32 +811,35 @@ class GetAttr(BaseHasAttr):
             return UDispatch(self, args, kwargs, return_no_traced) 
 
 
-class Argument(Op1):
-    """ Used to 'tag' and track the arguments to traced calls and dispatches """
+class SetAttr(Op1):
     def __init__(self, tag, op1):
         self._s('_tag', tag)
-        super().__init__(op1)
+        super().__init__(op1, op1)
 
-    def __setattr__(self, name, value):
-        # Setting goes through to set on argument object.
-        self._op1.__setattr__(name, value)
+    def __repr__(self):
+        return self._op1._precedence_repr(CALL_PRECEDENCE)+'.'+self._tag.name
 
-    def __repr__(self): 
-        return self._tag.name+'='+self._op1._precedence_repr(LIMIT_PRECEDENCE)
-
-    def _op1o(self, v1):
-        # TODO: Probably best raise exception, because not expected to be called.
-        return v1
 
     def _precedence(self):
         return CALL_PRECEDENCE
 
-
-
-class SetAttr(BaseHasAttr):
     def _op1o(self, v1):
         # TODO: Probably best raise exception, because not expected to be called.
         return v1
+
+
+class Argument(Traced):
+    """ Used to 'tag' and track the arguments to traced calls and dispatches """
+    def __init__(self, tag, trace):
+        self._s('_tag', tag)
+        super().__init__(trace._value, trace)
+
+    def __setattr__(self, name, value):
+        # Setting goes through to set on argument object.
+        self._trace.__setattr__(name, value)
+
+    def __repr__(self): 
+        return self._tag.name+'='+self._trace._precedence_repr(LIMIT_PRECEDENCE)
 
 
 def signature_helper(func_or_method):
@@ -735,16 +915,16 @@ class SignatureHelper:
             if isinstance(value, Traced):
                 has_traced = True 
             else:
-                value = Traced(value)
+                value = to_traced(value)
             # As arguments are 'process' (unrolled) we tag them as arguments.
             return Argument(tag, value), has_traced
 
         has_traced = False
 
         call_args = list()
-        for idx in range(self.count_positionals):
+        for idx in range(0, self.count_positionals):
             argument, has_traced = unroll_arg(has_traced)
-            if idx == 0 and isinstance(argument._op1, Obj):
+            if idx == 0 and isinstance(argument._trace, Obj):
                 has_traced = False
             assert(argument._tag.param_kind 
                    == inspect.Parameter.POSITIONAL_ONLY or
@@ -759,17 +939,17 @@ class SignatureHelper:
             call_args.append(argument) 
 
         call_kwargs = dict()
-        for _ in range(self.count_keywords):
+        for _ in range(0, self.count_keywords):
             argument, has_traced = unrol_arg(has_traced)
             assert(argument._tag.param_kind 
                    == inspect.Parameter.KEYWORD_ONLY) 
-            call_kwargs[argument.name] = argument
+            call_kwargs[argument._tag.name] = argument
 
         if self.has_var_keyword:
             argument, has_traced = unroll_arg(has_traced)
             assert(argument._tag.param_kind 
                    == inspect.Parameter.VAR_KEYWORD) 
-            call_kwargs[argument.name] = argument
+            call_kwargs[argument._tag.name] = argument
 
         return tuple(call_args), call_kwargs, has_traced
 
@@ -778,45 +958,45 @@ TRACED_MODULE_NAMES = set()
 TRACED_CLASSES = set()
 MODULES_WITH_UNTRACED_PARENTS = list()
 
+def trace_class(cls, has_members):
+    assert(isinstance(type(cls), type))
+    sighelper = signature_helper(cls.__init__)
+    TRACED_CLASSES.add(cls)
+    setattr(has_members, cls.__name__, Class(cls))
+
 
 def trace_modules(module_names):
     """ Trace all classes and top-level functions of given module names """
 
-    def trace_class(cls, has_members):
-        assert(isinstance(type(cls), type))
-        sighelper = signature_helper(cls.__init__)
-        TRACED_CLASSES.add(cls)
-        setattr(has_members, cls.__name__, Class(cls))
-
-
-
-    def all_parents(cls):
-        parents = set()
-        def get_parents(cls):
-            for parent in cls.__bases__:
-                if parent != object:
-                    parents.add(parent)
-                    get_parents(parent)
-        get_parents(cls)
-        return parents
 
     def trace_module(module_name):
+        def all_parents(cls):
+            parents = set()
+            def get_parents(cls):
+                for parent in cls.__bases__:
+                    if parent != object:
+                        parents.add(parent)
+                        get_parents(parent)
+            get_parents(cls)
+            return parents
+
+
         module = __import__(module_name)
         to_process_classes = list()
-        def trace_classes(has_members):
+        def trace_classes(has_members, to_process_classes):
             for name, obj in inspect.getmembers(has_members):
                 if inspect.isclass(obj):
                     if obj.__module__ == module_name:
                         parents = all_parents(obj)
                         untraced_parents = parents - TRACED_CLASSES
-                        trace_classes(obj)
+                        trace_classes(obj, to_process_classes)
                         if not untraced_parents:
                             to_process_classes.append((has_members, obj))
                         else:
                             MODULES_WITH_UNTRACED_PARENTS.append((has_members,
                                                                   obj, 
                                                                   untraced_parents))
-        trace_classes(module)
+        trace_classes(module, to_process_classes)
         for has_members, cls in to_process_classes:
             trace_class(cls, has_members)
         for name, obj in inspect.getmembers(module):

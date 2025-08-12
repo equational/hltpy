@@ -23,7 +23,8 @@ SOFTWARE.
 """
 
 from traced import Traced, NewInit, Obj, Call, Dispatch, UCall, UDispatch, \
-        Argument, Op1, Op2, GetAttr
+        Argument, Op1, Op2, GetAttr, SetAttr, DeepTraced, to_deep, rebuild_deep, \
+        Iterator, Iteration, Generator, Generation
 from constraints import BuildUpstreamConstraints
 import graphviz
 
@@ -38,8 +39,8 @@ class Render:
 
 
         self.dot = graphviz.Digraph('Graph')
-        self.dot.attr(rankdir='TB', size='2,5', dpi='300')
-        self.dot.attr('node', shape='box')
+        self.dot.attr(rankdir='TB', size='5,5', dpi='300', pad="0.1")
+        self.dot.attr('node', shape='plain')
 
         self.nodes = dict()
         self.edges = dict()
@@ -49,7 +50,7 @@ class Render:
 
     def mk_node_label(self, value):
         def val(x):
-            if isinstance(x, (int, float)):
+            if isinstance(x, (int, float, tuple, list, frozenset, dict)):
                 return str(x)
             elif isinstance(x, str):
                 return "'"+x+"'"
@@ -59,7 +60,7 @@ class Render:
                 return x.__class__.__name__
  
         match value:
-            case NewInit(_obj=obj):
+            case NewInit(_trace=obj):
                 return  f"""<<TABLE>
                                 <TR>
                                     <TD>{value.__class__.__name__}</TD>
@@ -85,6 +86,48 @@ class Render:
                                 <TR>
                                     <TD>{value.__class__.__name__}</TD>
                                     <TD>{tag.name}</TD>
+                                </TR>
+                            </TABLE>>"""
+            case SetAttr(_tag=tag):
+                return  f"""<<TABLE>
+                                <TR>
+                                    <TD>{value.__class__.__name__}</TD>
+                                    <TD>{tag.name}</TD>
+                                </TR>
+                            </TABLE>>"""
+            case DeepTraced(_value=x):
+                return  f"""<<TABLE>
+                                <TR>
+                                    <TD>{val(x)}</TD>
+                                </TR>
+                                <TR>
+                                    <TD>{x.__class__.__name__}</TD>
+                                </TR>
+                           </TABLE>>"""
+            case Iteration(_count=count):
+                return  f"""<<TABLE>
+                                <TR>
+                                    <TD>{value.__class__.__name__}</TD>
+                                    <TD>{str(count)}</TD>
+                                </TR>
+                            </TABLE>>"""
+            case Iterator():
+                return  f"""<<TABLE>
+                                <TR>
+                                    <TD>{value._value.__class__.__name__}</TD>
+                                </TR>
+                            </TABLE>>"""
+            case Generation(_count=count):
+                return  f"""<<TABLE>
+                                <TR>
+                                    <TD>{value.__class__.__name__}</TD>
+                                    <TD>{str(count)}</TD>
+                                </TR>
+                            </TABLE>>"""
+            case Generator():
+                return  f"""<<TABLE>
+                                <TR>
+                                    <TD>{value._value.__class__.__name__}</TD>
                                 </TR>
                             </TABLE>>"""
             case Traced(_value=x):
@@ -125,14 +168,11 @@ class Render:
 
     def apply_node(self, value):
         label = self.node_label(value)
-        self.dot.node(str(id(value)), label)
-
+        self.dot.node(str(id(value)), label, shape='box' if label.find("TABLE")==-1 else 'plain')
 
     def apply_edge(self, e_name, n_0, n_1):
         e_key, label = self.edge_label(e_name, n_0, n_1)
         self.dot.edge(str(id(n_0)), str(id(n_1)), label=label)
-
-
 
     def apply_node_and_edges(self, value):
         assert(isinstance(value, Traced))
@@ -140,21 +180,49 @@ class Render:
         if value_id not in self.rendered_nodes:
             self.rendered_nodes.add(value_id)
             self.apply_node(value)
-            for e_name, n_1 in value.__dict__.items():
-                if isinstance(n_1, Traced):
-                    self.apply_edge(e_name, value, n_1)
-                    self.apply_node_and_edges(n_1)
-                elif isinstance(n_1, tuple):
-                    for idx, n_1_e in enumerate(n_1):
-                        self.apply_edge(e_name+':'+str(idx), value, n_1_e)
-                        self.apply_node_and_edges(n_1_e)
-                elif isinstance(n_1, dict):
-                    for item, n_1_e in n_1.items():
-                        self.apply_edge(e_name+':'+item, value, n_1_e)
-                        self.apply_node_and_edges(n_1_e)
+            match value:
+                case DeepTraced():
+                    td = TraverseDeep(self, value)
+                    td.apply_deep_edges(value._traced_value)
+                case Traced():
+                    for e_name, n_1 in value.__dict__.items():
+                        if e_name not in {'_tag', '_value'}:
+                            match n_1:
+                                case Traced():
+                                    self.apply_edge(e_name, value, n_1)
+                                    self.apply_node_and_edges(n_1)
+                                case tuple():
+                                    for idx, n_1_e in enumerate(n_1):
+                                        self.apply_edge(e_name+':'+str(idx), value, n_1_e)
+                                        self.apply_node_and_edges(n_1_e)
+                                case dict():
+                                    for item, n_1_e in n_1.items():
+                                        self.apply_edge(e_name+':'+item, value, n_1_e)
+                                        self.apply_node_and_edges(n_1_e)
+                                case _:
+                                    pass
+
+class TraverseDeep:
+    def __init__(self, renderer, value):
+        self.renderer = renderer
+        self.value = value
+        self.edge_count = 0
+
+    def mk_edge_counter(self):
+        counter = self.edge_count
+        self.edge_count += 1
+        return counter
+
+    def apply_deep_edges(self, traced_value):
+        rebuild_deep(traced_value, to_deep, self.process_traced)
 
 
+    def process_traced(self, n_1):
+        self.renderer.apply_edge('deep:'+str(self.mk_edge_counter()), self.value, n_1)
+        self.renderer.apply_node_and_edges(n_1)
+        return n_1
 
+        
 
 
 

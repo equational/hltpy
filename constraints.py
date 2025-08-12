@@ -83,8 +83,8 @@ class BuildUpstreamConstraints(Evaluator):
         if constraint not in constraints:
             constraints.append(constraint)
 
-    def new_init(self, traced):
-        self.add_constraint(HasInit(traced._obj, traced))
+    def new_init(self, call_env, traced):
+        self.add_constraint(HasInit(traced._trace, traced))
         return traced
 
     def obj(self, traced):
@@ -95,14 +95,14 @@ class BuildUpstreamConstraints(Evaluator):
         return traced
 
 
-    def call(self, traced):
-        self(traced._return)
+    def call(self, call_env, traced):
+        self(traced._trace)
         # Getted object depends on mathod call signature
         self.add_constraint(IsCallableFunction(traced, traced._callable))
         return traced
 
-    def dispatch(self, traced):
-        self(traced._return)
+    def dispatch(self, call_env, traced):
+        self(traced._trace)
         # Getted object depends on mathod call signature
         self.add_constraint(HasCallableMethod(traced, traced._callable))
         return traced
@@ -124,9 +124,13 @@ class BuildUpstreamConstraints(Evaluator):
         match traced:
            case GetItem():
                 # Getted object depends on accessed item
-                self.add_constraint(HasItem(traced, op1._op1))
+                if op1._trace is not None:
+                    self.add_constraint(HasItem(traced, op1._trace))
            case _:
                 pass
+        return traced
+
+    def deeptraced(self, traced):
         return traced
 
     def traced(self, traced):

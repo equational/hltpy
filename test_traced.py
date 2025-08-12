@@ -23,9 +23,14 @@ SOFTWARE.
 """
 
 import unittest
-from traced import trace_modules, from_traced, trace, Traced, TRACED_CLASSES, \
+from traced import trace_modules, from_traced, trace, \
+        Traced, Hashable, DeepTraced, DeepHashable, Iteration, \
+        TRACED_CLASSES, \
         MODULES_WITH_UNTRACED_PARENTS, \
         TRACED_MODULE_NAMES
+import types
+import numpy as np
+
 
 def plus2(a):
     return a+2
@@ -33,7 +38,9 @@ def plus2(a):
 class TestTracer01(unittest.TestCase):
 
     def test_module01(self):
-        self.assertEqual(TRACED_CLASSES, {from_traced(TestTracer01.AddX), from_traced(TestTracer01.AddX2)})
+        self.assertEqual(TRACED_CLASSES, 
+                         {from_traced(TestTracer01.AddX), 
+                          from_traced(TestTracer01.AddX2)})
 
     class AddX:
         def __init__(self, x):
@@ -82,14 +89,71 @@ class TestTracer01(unittest.TestCase):
         # print(final_value.__repr__())
         # print(final_value._return.__repr__())
  
-
     def test_tuple01(self):
         a = trace((2,3))
         b = trace((2,trace(3)))
         c = trace((2, (3, trace(4))))
         self.assertEqual(a, (2,3))
-        self.assertEqual(b._traced_tuple[1].__class__, Traced)
-        self.assertEqual(c._traced_tuple[1][1].__class__, Traced)
+        self.assertEqual(b._traced_value[1].__class__, Hashable)
+        self.assertEqual(c._traced_value[1]._traced_value[1].__class__, Hashable)
+
+    def test_slice01(self):
+        a = trace([1,2,3,4])
+        b = a[trace(1):-1]
+        self.assertEqual(b._op2.__class__, DeepHashable)
+
+    def test_slice02(self):
+        a = trace(np.array([[1,2,3,4], [5,6,7,8]]))
+        b = a[1, trace(1):-1]
+        self.assertEqual(b._op2.__class__, DeepHashable)
+
+    def test_dict01(self):
+        a = trace({'a':1, 'b':trace(2)})
+        r = a['a']
+        self.assertEqual(int(r), 1)
+        self.assertEqual(r._op1.__class__, DeepTraced)
+
+    def test_dict02(self):
+        a = trace({'a':1, 'b':2})
+        r = a[trace('a')]
+        self.assertEqual(int(r), 1)
+        self.assertEqual(r._op2.__class__, Hashable)
+
+    def test_dict02(self):
+        a = trace({trace('a'):1, 'b':2})
+        r = a[trace('a')]
+        self.assertEqual(int(r), 1)
+        self.assertEqual(r._op1.__class__, DeepTraced)
+        self.assertEqual(r._op2.__class__, Hashable)
+
+    def test_dict03(self):
+        a = trace({trace('a'):1, trace('b'):2})
+        r = a['a']
+        self.assertEqual(int(r), 1)
+        self.assertEqual(r._op1.__class__, DeepTraced)
+        self.assertEqual(r._op2.__class__, Hashable)
+
+    def test_frozenset01(self):
+        a = trace(frozenset({1,2,trace(3),4}))
+        r = trace(5) in a
+        self.assertEqual(bool(r), False)
+        self.assertEqual(a.__class__, DeepHashable)
+
+
+    def test_iter01(self):
+        l1 = trace([1,2,3])
+        l2 = trace([e for e in l1])
+        self.assertEqual(int(l2[1]), 2)
+        self.assertEqual(l2._traced_value[1]._iterator._iterable, l1)
+
+
+    def test_iter02(self):
+        d1 = trace({'a':1, 'b':2})
+        d2 = trace({'x':10, 'y':12})
+        d3 = trace({(k1,k2):(v1,v2) for k1, v1 in d1.items() for k2, v2 in d2.items()})
+        self.assertEqual(d3[('a','x')]._trace._traced_value[0]._trace.__class__, Iteration)
+        self.assertEqual(int(d3[('a','x')][1]), 10)        
+
 
 if __name__ == '__main__':
     trace_modules([__name__])
